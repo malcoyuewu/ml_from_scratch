@@ -1,4 +1,4 @@
-instead of split sequence to multi head, what are other methods to create multi head, in order to favour the semantic herarchitc?
+-- instead of split sequence to multi head, what are other methods to create multi head, in order to favour the semantic herarchitc?
 In typical Transformer architectures, "Multi-Head" usually refers to splitting the hidden dimension. However, if your goal is to favor **semantic hierarchy**—meaning you want different heads to capture different levels of abstraction (like syntax vs. semantics or local vs. global context)—splitting the dimension is often too "flat."
 
 Here are the primary alternative methods to construct multi-head structures that prioritize hierarchical or semantic depth:
