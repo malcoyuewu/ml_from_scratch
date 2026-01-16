@@ -39,11 +39,36 @@ class KMeans:
                 
         return self._get_cluster_labels(self.clusters)
 
-    def _initial_centroids(self, X):
+    def _initial_centroids(self, X, plus = False):
+        if plus: # kmeans plus
+            n_samples, n_features = X.shape
+            # 1. Randomly select the first centroid from the data points
+            centroids = [X[np.random.randint(n_samples)]]
+    
+            # 2. Select the remaining K-1 centroids
+            for _ in range(1, self.k):
+                # Calculate the squared distance from each point to the nearest existing centroid
+                dists = np.array([min([np.sum((x - c)**2) for c in centroids]) for x in X])
+                
+                # Calculate probabilities: P(x) = D(x)^2 / sum(D(x)^2)
+                probs = dists / dists.sum()
+                cumulative_probs = np.cumsum(probs)
+                r = np.random.rand()
+    
+                # Pick the next centroid based on the probability distribution
+                for idx, p in enumerate(cumulative_probs):
+                    if r < p:
+                        centroids.append(X[idx])
+                        break
+                    
+            return np.array(centroids)
+            
         X_min = np.min(X, axis=0)
         X_max = np.max(X, axis=0)
         # Generate random points within the bounding box of the data
         return np.random.uniform(X_min, X_max, size=(self.k, self.n_features))
+
+        
 
     def _create_clusters(self, centroids):
         clusters = [[] for _ in range(self.k)]
