@@ -845,11 +845,13 @@ Because the loss function  can be complex, XGBoost simplifies it using a **Taylo
 
 *(Where  is the L2 regularization term).*
 This formula allows XGBoost to calculate the exact best value to put in a leaf in one shot, rather than searching for it via trial and error.
+<img width="208" height="88" alt="image" src="https://github.com/user-attachments/assets/920e037b-9ab3-49e9-ad41-a203d65328f5" />
 
 ### Q: What is the "Gain" formula and how does it relate to second-order info?
 
 **Answer:** XGBoost uses a specific Gain formula to decide where to split a node. It measures how much the "Structure Score" (quality of the tree) improves after a split:
 
+<img width="459" height="99" alt="image" src="https://github.com/user-attachments/assets/5eb7f39c-8b19-441c-87e4-4f29dbbebae9" />
 
 
 If , the split is beneficial. This formula is derived entirely from the second-order Taylor approximation.
