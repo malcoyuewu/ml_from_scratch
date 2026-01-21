@@ -1,3 +1,27 @@
+考虑trade off之前，加不加component也是trade off。
+
+例如，为什么要加cache，不加cache有什么好处。
+常见的还有at least once vs at most once.
+read your write consistency vs eventual consistency
+这些在DDIA都提过。
+
+关于tradeoff, 我能想到是
+
+1: write heavy (LSM tree) vs read heavy (mysql + cache)
+2: pull vs post
+3: latency sensitive (sync + db) vs throughput sensitive (async + message queue)
+
+https://www.1point3acres.com/bbs/thread-1086103-6-1.html
+
+https://www.1point3acres.com/bbs/thread-1155409-1-1.html
+
+. Χ
+感觉看eng blog确实比较好，可以把online inference + logging和offline feature/data/training pipeline各环节作为关键词，搜各公司ml infra blog。两个feature store例子：
+Netflix的feature store Axion, 处理offline batch updates
+Pins的real-time features，包括普通的aggregation features和sequence features。
+
+https://www.1point3acres.com/bbs/thread-1038372-1-1.html
+
 -- please help me design with question caliabration --> goal -> high level model proposal --> features --> candidates generator --> fine rnker --> rerank --> trade off naalysis: "也是系统设计，推荐snap filter，偏model的那种。按Alex Xu的ML design讲就行。"
 下面给你一套 **“Alex Xu 风格 ML system design”** 的完整答题骨架，场景是 **Snap Filter 推荐（偏模型）**，并按你要的结构：
 
@@ -1410,4 +1434,534 @@ Total P99 Budget: 120-150ms (server side ~110-140ms + network)
 * **L5 版（讲到能落地即可） vs L6 版（强调生态/组织/可演进）逐字稿**
 * **面试官连环追问清单**（比如“怎么算 propensity？”“policy 误杀怎么查？”“ANN 索引怎么更新？”）并附标准回答
 <img width="1200" height="903" alt="image" src="https://github.com/user-attachments/assets/23896d45-9f25-49d6-9a77-2e28ed59385c" />
+
+https://medium.com/@zaiinn440/one-stop-guide-for-production-recommendation-systems-9491f68d92e3
+
+下面是一轮 **“Snap 面试官连环追问模拟（CNN + Multimodal）”**，风格完全贴近 **Snap Camera / Lens / Multimodal MLE** 面试。
+我会按 **真实面试节奏** 来：**面试官追问 → 你该怎么答 → L6 加分点 → 常见踩雷**。
+你可以直接当 **mock interview 脚本** 用。
+
+---
+
+# 🎤 Scene Setting（面试官开场）
+
+> *“You mentioned CNN-based perception and multimodal LLMs for Snap Camera and Lens. Let’s go deeper.”*
+
+---
+
+## Round 1：Vision 基础但带坑（5–7 分钟）
+
+### Q1️⃣ 面试官
+
+**“Why CNNs instead of ViTs for Snap Camera perception?”**
+
+#### ✅ 合格回答（L5）
+
+> CNNs are better suited for real-time, on-device inference. They have lower latency, smaller memory footprint, and more predictable performance across devices, which is critical for camera-first products like Snap.
+
+#### ⭐ L6 加分
+
+> This is fundamentally a **latency–semantic capacity trade-off**. For on-device, frame-by-frame perception, CNNs give us deterministic P99 latency and stable FPS. ViTs make more sense server-side or for offline understanding tasks where semantic richness matters more than strict real-time constraints.
+
+#### ❌ 踩雷
+
+* “CNN is better than ViT in general”
+* “ViT is too new”
+
+---
+
+### Q2️⃣ 面试官
+
+**“What vision tasks are actually critical for Lens recommendation?”**
+
+#### ✅ 合格回答
+
+> We don’t use CNNs to directly recommend lenses. CNNs provide structured perception signals—scene type, face attributes, segmentation masks—that become features for downstream retrieval and ranking.
+
+#### ⭐ L6 加分
+
+> CNN answers *“what the user is seeing”*, while ranking answers *“what we should show next”*. Mixing those responsibilities usually leads to brittle systems.
+
+#### ❌ 踩雷
+
+* “CNN directly ranks lenses”
+* “We feed raw pixels to ranking”
+
+---
+
+## Round 2：系统与实时性（Snap 非常看重）
+
+### Q3️⃣ 面试官
+
+**“How do you guarantee camera smoothness if CNN inference is heavy?”**
+
+#### ✅ 合格回答
+
+> We use lightweight architectures like MobileNet/EfficientNet, quantize to INT8, and deploy different models based on device capability. We also decouple vision inference from ranking so delays don’t block rendering.
+
+#### ⭐ L6 加分
+
+> Camera systems are designed assuming failure. If perception lags, we fall back to cached or previous-frame signals. A single dropped frame is worse than slightly stale semantics.
+
+#### ❌ 踩雷
+
+* “Add more GPU”
+* “Accuracy is more important than FPS”
+
+---
+
+### Q4️⃣ 面试官
+
+**“How do you handle temporal consistency across frames?”**
+
+#### ✅ 合格回答
+
+> We use temporal smoothing—EMA over embeddings or labels—and optionally sequence models to stabilize predictions across frames.
+
+#### ⭐ L6 加分
+
+> Single-frame accuracy is less important than **temporal coherence**. Jittery perception breaks user trust much faster than slightly incorrect labels.
+
+---
+
+## Round 3：Multimodal LLM 介入（重点）
+
+### Q5️⃣ 面试官
+
+**“Where exactly does a multimodal LLM fit into this pipeline?”**
+
+#### ✅ 合格回答
+
+> The multimodal LLM sits above perception. CNNs or ViTs extract visual embeddings; the LLM performs cross-modal reasoning—like interpreting a scene and mapping it to user intent or creative suggestions.
+
+#### ⭐ L6 加分
+
+> The key is **decoupling**: perception models convert pixels to symbols; LLMs operate on symbols, not raw frames. This keeps the system modular and debuggable.
+
+#### ❌ 踩雷
+
+* “LLM replaces CNN”
+* “End-to-end multimodal is better”
+
+---
+
+### Q6️⃣ 面试官
+
+**“Why not let the LLM rank lenses directly?”**
+
+#### ✅ 合格回答
+
+> LLMs are too slow and unstable for large-scale ranking. They’re better used to generate features, constraints, or reasoning signals for a traditional ranker.
+
+#### ⭐ L6 加分
+
+> LLMs are **copilots, not engines**. Deterministic ranking with guardrails belongs to numerical models; LLMs add semantic lift where it matters.
+
+#### ❌ 踩雷
+
+* “LLMs are smarter so they should rank”
+* “We just cache LLM results”
+
+---
+
+## Round 4：Multimodal Alignment（CLIP-style）
+
+### Q7️⃣ 面试官
+
+**“How do you align images and text in Snap?”**
+
+#### ✅ 合格回答
+
+> We use contrastive learning, similar to CLIP, where image and text embeddings are trained to be close for matched pairs and far apart otherwise.
+
+#### ⭐ L6 加分
+
+> Alignment quality depends more on **data diversity and hard negatives** than model size. Lens descriptions are noisy, so we often augment them with auto-generated captions and user behavior signals.
+
+#### ❌ 踩雷
+
+* “Just use off-the-shelf CLIP”
+* “More data always fixes alignment”
+
+---
+
+### Q8️⃣ 面试官
+
+**“What if Lens text descriptions are wrong or missing?”**
+
+#### ✅ 合格回答
+
+> We generate captions from vision models, normalize text across languages, and correct embeddings using apply/share feedback.
+
+#### ⭐ L6 加分
+
+> User behavior is the strongest alignment signal. If users consistently apply a lens in a given scene, that implicitly corrects semantic mismatches.
+
+---
+
+## Round 5：Safety & Hallucination（Snap 必考）
+
+### Q9️⃣ 面试官
+
+**“How do you prevent multimodal hallucinations?”**
+
+#### ✅ 合格回答
+
+> We enforce grounding by requiring visual evidence, constrain outputs to structured schemas, and fall back when confidence is low.
+
+#### ⭐ L6 加分
+
+> In creative tools, abstention is a valid output. A system that sometimes says “I’m not sure” is safer than one that’s always confident.
+
+#### ❌ 踩雷
+
+* “We trust the model”
+* “RLHF solves hallucination”
+
+---
+
+## Round 6：Evaluation & Failure Modes
+
+### Q1️⃣0️⃣ 面试官
+
+**“How do you evaluate CNN + multimodal systems offline and online?”**
+
+#### ✅ 合格回答
+
+> Offline we evaluate perception accuracy and alignment metrics; online we look at apply/share uplift, session depth, and safety violations.
+
+#### ⭐ L6 加分
+
+> The real signal is **counterfactual consistency**: do offline gains predict online uplift? If not, the problem is usually feature integration, not the model itself.
+
+---
+
+### Q1️⃣1️⃣ 面试官（终极问题）
+
+**“When should Snap *not* use multimodal LLMs?”**
+
+#### ⭐ L6 完美答案
+
+> When latency is critical, the task is rule-based, or ROI is unclear. Choosing not to use an LLM is often the most senior architectural decision.
+
+#### ❌ 踩雷
+
+* “Always use LLMs”
+* “Because it’s trendy”
+
+---
+
+# 🧠 30 秒终极总结（CNN + Multimodal，Snap 风格）
+
+> “In Snap’s camera-first ecosystem, CNNs handle real-time perception with strict latency guarantees, while multimodal LLMs sit above perception to provide semantic reasoning and creative assistance. The two are decoupled by design: CNNs convert pixels into stable signals; LLMs operate on those signals without blocking the camera or ranking pipeline. This separation lets us scale safely, iterate quickly, and maintain user trust.”
+
+---
+
+如果你愿意，下一步我可以继续 **高强度 Snap 模拟**：
+
+* 🎭 **你来答，我来当 Snap 面试官追问（实战模式）**
+* 🧩 给你一份 **“Snap CNN + Multimodal 必死坑清单”**
+* 📐 帮你画一张 **Camera + Lens 多模态系统终极白板图**
+
+你想直接进入 **实战 mock** 吗？
+
+<img width="1788" height="1346" alt="image" src="https://github.com/user-attachments/assets/3a613442-1950-42d5-8d39-0c897d1e3b2f" />
+
+I generated images with the prompt: 'dedicated diagram image of a whiteboard-style ML system design for Snap filter recommendation, showing candidate generator, fine ranker, and diversity-oriented reranker with latency budgets and diversity metrics, inspired by Alex Xu's approach'
+
+-- follow up questions and answers about logging please
+
+下面是一套 **Snap 面试高频 · Logging & Observability 连环 follow-up 问答库**，完全贴合 **Camera / Lens / 推荐 / CNN / Multimodal / MTML** 场景。
+风格是 **“面试官刁钻追问 → 标准答案 → L6 加分 → 踩雷点”**，你可以直接用来 mock。
+
+---
+
+# 一、Logging 的总体设计
+
+## Q1️⃣ 面试官
+
+**“Why is logging critical in Snap’s recommendation and camera systems?”**
+
+### ✅ L5 合格回答
+
+> Logging is critical for debugging, offline training, and evaluation. Without logs, we can’t understand why a model made a decision or reproduce issues.
+
+### ⭐ L6 加分回答
+
+> Logging is the **only source of truth** connecting perception, ranking, and user outcomes. In Snap, where camera, ML models, and policy interact in real time, logs are how we ensure debuggability, accountability, and long-term model health.
+
+### ❌ 踩雷
+
+* “Logging is mainly for offline training”
+* “Metrics dashboards are enough”
+
+---
+
+# 二、你到底 log 什么？（必考）
+
+## Q2️⃣ 面试官
+
+**“What exactly do you log for a Lens recommendation request?”**
+
+### ✅ L5 合格回答
+
+> We log request context, candidate lists, ranking scores, impressions, and user interactions like apply or share.
+
+### ⭐ L6 加分回答（结构化）
+
+> I log **five layers**, all tied by `request_id`:
+
+1. **Request / Context**: user, session, device, entry surface, experiment id
+2. **Candidate logs**: recall source, candidate IDs, recall scores, latency
+3. **Ranking logs**: model version, feature schema, per-head scores (sampled)
+4. **Impression logs**: final top-K with positions and policy flags
+5. **Outcome logs**: apply / share / hide / crash with impression_id
+
+> This enables full replay and counterfactual analysis.
+
+### ❌ 踩雷
+
+* “We log predictions”
+* “We only log final results”
+
+---
+
+## Q3️⃣ 面试官
+
+**“Do you log all features used by the model?”**
+
+### ✅ L5 合格回答
+
+> No. Logging all features would be too expensive. We log a subset.
+
+### ⭐ L6 加分回答
+
+> Never log full feature vectors.
+> I log:
+
+* feature **presence / missing flags**
+* a small **explainability subset**
+* a **feature schema version hash**
+  This avoids privacy issues and still allows debugging training-serving skew.
+
+### ❌ 踩雷
+
+* “Yes, for reproducibility”
+* “We log raw images”
+
+---
+
+# 三、Logging × CNN / Vision（Snap 专属）
+
+## Q4️⃣ 面试官
+
+**“What do you log from CNN perception models?”**
+
+### ✅ L5 合格回答
+
+> We log model outputs like scene labels or face attributes.
+
+### ⭐ L6 加分回答
+
+> We never log raw images.
+> We log:
+
+* high-level semantic labels (scene, face present)
+* embedding version + stats (norm, age)
+* confidence scores
+  This balances privacy, debuggability, and safety auditing.
+
+### ❌ 踩雷
+
+* “We store frames for debugging”
+* “We log pixel data”
+
+---
+
+## Q5️⃣ 面试官
+
+**“How do you debug perception jitter or instability?”**
+
+### ⭐ L6 标准答案
+
+> I log **temporal sequences** of perception outputs (sampled), then check:
+
+* frame-to-frame variance
+* confidence oscillation
+* correlation with device / lighting
+  This helps distinguish model instability from sensor noise.
+
+---
+
+# 四、Logging × MTML 精排（高频）
+
+## Q6️⃣ 面试官
+
+**“How do you log MTML predictions without exploding storage?”**
+
+### ✅ L5 合格回答
+
+> We sample ranking logs and only log top candidates.
+
+### ⭐ L6 加分回答
+
+> We:
+
+* log **only top-N** items
+* sample traffic (e.g., 1–5%)
+* log **per-head outputs**, not intermediate tensors
+  This allows head-level debugging (apply vs hide) at manageable cost.
+
+### ❌ 踩雷
+
+* “We don’t log per-head outputs”
+* “Storage is cheap”
+
+---
+
+## Q7️⃣ 面试官
+
+**“How do you detect that one MTML head is dominating others?”**
+
+### ⭐ L6 标准答案
+
+> By logging:
+
+* per-head score distributions
+* per-head online metrics
+* score correlation over time
+  If apply ↑ but hide ↑, logs immediately show head imbalance.
+
+---
+
+# 五、Logging × Evaluation（OPE / A/B）
+
+## Q8️⃣ 面试官
+
+**“What logging is required for counterfactual evaluation?”**
+
+### ✅ L5 合格回答
+
+> We need logged actions, rewards, and propensities.
+
+### ⭐ L6 加分回答
+
+> Specifically:
+
+* action (lens_id, position)
+* logging policy probability (propensity)
+* candidate set context
+* outcome labels
+  Without **accurate propensities**, IPS / DR estimates are meaningless.
+
+### ❌ 踩雷
+
+* “We can infer propensities”
+* “We don’t need randomization”
+
+---
+
+## Q9️⃣ 面试官
+
+**“How do you validate offline OPE against online A/B?”**
+
+### ⭐ L6 标准答案
+
+> I log OPE predictions alongside experiment IDs, then compare predicted uplift vs actual A/B uplift. Persistent divergence signals bias or logging errors, not model quality.
+
+---
+
+# 六、Failure & Debugging（真实面试最像）
+
+## Q1️⃣0️⃣ 面试官
+
+**“Apply rate dropped overnight. What logs do you check first?”**
+
+### ✅ L5 合格回答
+
+> I’d check model metrics and recent deployments.
+
+### ⭐ L6 加分回答（顺序很重要）
+
+1. policy filter hit rate (误杀？)
+2. feature missing / timeout logs
+3. recall coverage by source
+4. model / feature version mismatch
+5. client-side or UI changes
+
+> Logging lets me rule out whole classes of failures quickly.
+
+### ❌ 踩雷
+
+* “Rollback the model immediately”
+* “Probably data drift”
+
+---
+
+## Q1️⃣1️⃣ 面试官
+
+**“How do you support full request replay?”**
+
+### ⭐ L6 标准答案
+
+> All logs share a `request_id`. Given a request, I can reconstruct:
+> context → candidates → scores → final ranking → outcomes.
+> This is essential for trust, debugging, and incident reviews.
+
+---
+
+# 七、Privacy & Compliance（Snap 非常敏感）
+
+## Q1️⃣2️⃣ 面试官
+
+**“How do you balance logging and user privacy?”**
+
+### ✅ L5 合格回答
+
+> We avoid logging raw data and anonymize user IDs.
+
+### ⭐ L6 加分回答
+
+> Principles:
+
+* log **signals, not content**
+* hash or bucket user identifiers
+* strict TTL and access control
+* policy-driven redaction
+  Logging must be **privacy-first by design**, not an afterthought.
+
+### ❌ 踩雷
+
+* “Engineers only access logs”
+* “We delete later”
+
+---
+
+# 八、终极问题（Staff / L6 分水岭）
+
+## Q1️⃣3️⃣ 面试官
+
+**“What’s the biggest logging mistake you’ve seen?”**
+
+### ⭐ L6 完美答案
+
+> Logging predictions without logging **decisions and context**.
+> Without knowing *what alternatives were considered*, logs are useless for learning or accountability.
+
+---
+
+# 🧠 30 秒 Logging 总结（Snap 风格）
+
+> “In Snap systems, logging is not an afterthought—it’s the backbone of debugging, evaluation, and trust. I design logs to capture context, candidate alternatives, model decisions, and outcomes, all tied by request IDs. I avoid logging raw content, sample aggressively, and log just enough structure to replay decisions, support counterfactual evaluation, and detect failures early.”
+
+---
+
+如果你愿意，下一步我可以：
+
+* 🎭 **做一轮 Logging 专项 mock（你答，我追问）**
+* 🧾 给你一份 **Snap Logging 必死坑清单**
+* 🧩 把 logging + feature store + OPE 画成一张 **终极白板图**
+
+你想继续哪一个？
+
 
