@@ -1829,6 +1829,15 @@ I generated images with the prompt: 'dedicated diagram image of a whiteboard-sty
 
 * per-head score distributions
 * per-head online metrics
+
+* 补充一个常用tradeoff:
+embedding和模型一起训练可能会得到更好的效果，但是embedding layer通常是模型中参数最多的部分，所以latency限制比较紧张， 或者separately trained (pretrained) embedding足够好的的时候也可以在two-tower 训练的时候freeze emebdding
+
+https://www.1point3acres.com/bbs/thread-1158161-1-1.html
+
+https://www.1point3acres.com/bbs/thread-1155409-1-1.html
+
+*** https://www.1point3acres.com/bbs/thread-1088518-1-1.html
 * score correlation over time
   If apply ↑ but hide ↑, logs immediately show head imbalance.
 
