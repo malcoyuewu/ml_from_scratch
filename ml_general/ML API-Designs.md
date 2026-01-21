@@ -1,4 +1,9 @@
 API Calls
+Post --> Put API
+
+json{
+
+}
 
 1. Recommedation endpoint
   ### API Design for Snapchat Lens Recommendation ML System
