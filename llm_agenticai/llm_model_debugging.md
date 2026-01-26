@@ -1,3 +1,6 @@
+https://grok.com/share/c2hhcmQtNQ_6d5d5b9a-6f5b-4596-87e5-bac79eabd418
+
+
 My work focuses on leading end-to-end GenAI and recommendation systems, spanning LLM-based search and ranking, multi-task and multi-objective optimization, RLHF and post-training pipelines, and production deployment of Transformer-, SparseNN-, and multi-modal models at global scale under strict latency and reliability constraints.
 
 Please help me recover the apple news team llm code explaining interview question: giving a pytorch function of tensor processing, mostly related to attention/trasformer block, the function process the tensor with heavily usage of tensor integrated functions, like squeeze, flattern, normalization, and reshape (not much view operation), and application of mask, please help me generate a complete sample, with detailed explaination of the integrated models and overall purpose stetp by step
