@@ -546,3 +546,552 @@ def get_sinusoidal_pos_enc(seq_len: int, d_model: int) -> torch.Tensor:
 You add this to your token embeddings before feeding into the transformer layers.
 
 **Bottom line**: Positional encoding is what makes Transformers actually understand **sequences** instead of just bags of tokens. Without it, order-sensitive tasks (pretty much all language, code, time series, etc.) collapse. The sinusoidal version is mathematically beautiful and surprisingly hard to beat even in 2026.
+
+
+### please dive into how to use debugging agent and evaluator agents to Avoiding the big failure modes related to insufficient usage of memerty, the general desing, implementation plan, and sample schama/code
+
+Below is a concrete, agentic pattern that uses **(1) an Evaluator Agent** + **(2) a Debugging Agent** to systematically prevent memory-related failures: *forgot to use memory*, *used the wrong memory*, *used stale/unsafe memory*, and *blew the token budget*.
+
+I’ll give:
+
+* Failure-mode taxonomy + what to measure
+* General design (runtime + offline)
+* Implementation plan (phased)
+* A practical memory schema
+* Sample code (Python) for: memory router, evaluator, debugger, and an “auto-fix loop”
+
+---
+
+## 0) The memory failure modes you’re trying to prevent
+
+### F0 — **Underuse** (insufficient memory usage)
+
+* The assistant *should* have retrieved a preference/constraint/decision, but didn’t.
+* Symptom: user repeats themselves, or answer conflicts with known preference.
+
+### F1 — **Overuse / irrelevant recall**
+
+* You retrieved memory, but it wasn’t relevant; it distracts, confuses, or biases the answer.
+
+### F2 — **Stale / contradictory memory**
+
+* Memory says A, current user says B; model uses A anyway.
+
+### F3 — **Unsafe memory handling**
+
+* You stored something sensitive without consent, or you surfaced a private detail unnecessarily.
+
+### F4 — **Token / latency blow-up**
+
+* Retrieval returns too much; prompt bloat.
+
+To fix these, your agents need **observable traces** and **explicit scoring rubrics**.
+
+---
+
+## 1) Design: “Memory Router + Evaluator + Debugger” loop
+
+### Runtime control loop (per turn)
+
+1. **Memory Router** decides *whether* to read memory, and *which tier* (summary vs detailed).
+2. Main assistant responds using injected “Memory Digest”.
+3. **Evaluator Agent** scores the response + memory usage (F0–F4) using traces.
+4. If score fails thresholds, run **Debugging Agent**:
+
+   * Diagnose root cause (router gate too strict? retrieval irrelevant? missing keys? bad ranking?)
+   * Propose a fix *for this turn* (rerun with different memory tier / refined query / filtered memory)
+5. Optionally rerun assistant once with corrected memory context (bounded retries).
+
+This is exactly the “outcome loop” mentality: *detect → diagnose → repair*.
+
+### Offline control loop (batch / nightly)
+
+* Sample turns from production logs.
+* Evaluator labels failures and writes structured “tickets” (root cause categories).
+* Debugger proposes router threshold changes, memory schema changes, prompt policy changes.
+* You regression-test on a held-out dataset.
+
+---
+
+## 2) Implementation plan (phased)
+
+### Phase 1 — Instrumentation (do this first)
+
+Log a “memory trace” for every turn:
+
+* router decision: read? tier? why?
+* retrieval query + results (ids only)
+* memory injected token count
+* final answer
+* user follow-up outcome signals (e.g., “you forgot”, “as I said”, re-ask rate)
+
+Without this, evaluator/debugger are blind.
+
+### Phase 2 — Evaluator Agent (shadow mode)
+
+Run evaluator asynchronously/offline:
+
+* Produce scores: `underuse`, `irrelevance`, `stale`, `unsafe`, `bloat`
+* Produce a single pass/fail + reason.
+
+### Phase 3 — Debugger Agent (auto-fix suggestions)
+
+Use evaluator failures to:
+
+* Recommend rerun strategy (e.g. “escalate from L2→L3”, “filter stale memories”, “tighten query to project=X”)
+* In shadow mode, compare “fixed rerun” vs original.
+
+### Phase 4 — Online bounded repair
+
+Enable **one** repair rerun for high-value intents (e.g., scheduling, coding, commitments) under strict budget.
+
+---
+
+## 3) Memory schema (practical and debuggable)
+
+Use **structured memory** + **chunk memory**, both with provenance.
+
+### 3.1 Structured (semantic) memory: key-value
+
+```sql
+-- user_semantic_memory
+memory_id        TEXT PRIMARY KEY
+user_id          TEXT
+key              TEXT             -- e.g. "pref.response_style", "tz", "project.active"
+value_json       JSON
+confidence       REAL             -- 0..1
+source_turn_id   TEXT
+created_at       TIMESTAMP
+updated_at       TIMESTAMP
+expires_at       TIMESTAMP NULL   -- optional
+sensitivity      TEXT             -- "normal" | "sensitive"
+consent_level    TEXT             -- "implicit" | "explicit"
+status           TEXT             -- "active" | "stale" | "revoked"
+tags             TEXT[]           -- e.g. ["project:ranking", "interview:google"]
+```
+
+### 3.2 Episodic memory: summaries (Level 1)
+
+```sql
+-- session_summaries
+summary_id      TEXT PRIMARY KEY
+user_id         TEXT
+session_id      TEXT
+summary_text    TEXT
+created_at      TIMESTAMP
+topics          TEXT[]            -- extracted tags
+```
+
+### 3.3 Detailed chunks (Level 3) with embeddings
+
+```sql
+-- memory_chunks
+chunk_id        TEXT PRIMARY KEY
+user_id         TEXT
+text            TEXT
+embedding       VECTOR
+created_at      TIMESTAMP
+source_turn_id  TEXT
+topics          TEXT[]
+sensitivity     TEXT
+status          TEXT             -- active/stale/revoked
+```
+
+### 3.4 Trace table (for evaluator/debugger)
+
+```sql
+-- memory_traces
+trace_id           TEXT PRIMARY KEY
+turn_id            TEXT
+user_id            TEXT
+router_decision    JSON           -- tier, rationale, gates
+retrieval_query    JSON
+retrieved_ids      JSON           -- ids only
+injected_tokens    INT
+answer_hash        TEXT
+eval_report        JSON NULL
+debug_report       JSON NULL
+created_at         TIMESTAMP
+```
+
+This trace is what makes debugging agent actually actionable.
+
+---
+
+## 4) Evaluator Agent: what it does + rubric
+
+Evaluator inputs:
+
+* user message
+* assistant answer
+* memory digest injected
+* memory trace (router decision + retrieved ids)
+* (optional) last N turns summary
+
+Evaluator outputs (JSON):
+
+* `scores`: F0..F4 each 0..1 (1 = good)
+* `failures`: list of detected failure modes
+* `why`: short explanations with evidence
+* `fix_suggestion`: recommended repair action (if any)
+
+### Example rubric
+
+* **Underuse (F0)** fails if:
+
+  * the user request references past decision/preferences (“as we discussed”) AND
+  * router didn’t retrieve relevant semantic keys OR
+  * response contradicts stored preference/constraint
+* **Irrelevance (F1)** fails if injected memory doesn’t support the answer, or answer mentions memory items not used.
+* **Stale (F2)** fails if:
+
+  * current user states something that conflicts with memory, and assistant uses memory without acknowledging conflict.
+* **Unsafe (F3)** fails if assistant surfaces sensitive memory not needed.
+* **Bloat (F4)** fails if injected memory tokens exceed budget OR contains long chunks when summary would suffice.
+
+---
+
+## 5) Debugging Agent: what it does
+
+Debugger inputs:
+
+* evaluator report
+* memory trace
+* retrieval candidates (top-k ids + metadata)
+* router configuration (thresholds, tier policy)
+
+Debugger outputs:
+
+* root cause category:
+
+  * `router_gate_too_strict`
+  * `query_bad`
+  * `retrieval_ranker_bad`
+  * `memory_missing_schema_key`
+  * `stale_not_filtered`
+  * `privacy_filter_missing`
+  * `budget_policy_wrong`
+* repair plan:
+
+  * new retrieval query / filters
+  * tier escalation suggestion
+  * memory digest compression instruction
+* (optional) router policy update suggestion (offline)
+
+---
+
+## 6) Sample code skeleton (Python)
+
+Below is a compact but realistic skeleton you can drop into a LangGraph/LangChain style setup.
+
+### 6.1 Data structures
+
+```python
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Literal
+import time
+import json
+
+MemoryTier = Literal["none", "L2_semantic", "L1_summary+L2", "L3_chunks+L2"]
+
+@dataclass
+class MemoryItem:
+    memory_id: str
+    text: str
+    tier: str                 # "L2" | "L1" | "L3"
+    tags: List[str]
+    confidence: float
+    sensitivity: str          # "normal" | "sensitive"
+    status: str               # "active" | "stale" | "revoked"
+    created_at: float
+
+@dataclass
+class MemoryTrace:
+    turn_id: str
+    router_decision: Dict[str, Any]
+    retrieval_query: Dict[str, Any]
+    retrieved_ids: List[str]
+    injected_tokens: int
+```
+
+### 6.2 Memory Router (policy + retrieval)
+
+```python
+class MemoryRouter:
+    def __init__(self, token_budget: int = 600, underuse_bias: float = 0.2):
+        self.token_budget = token_budget
+        self.underuse_bias = underuse_bias  # higher => more likely to retrieve
+
+    def decide_tier(self, user_text: str, intent: str, uncertainty: float) -> MemoryTier:
+        precision_markers = any(k in user_text.lower() for k in [
+            "exact", "what did we", "as we discussed", "last time", "quote", "numbers", "date", "slot"
+        ])
+        if intent in ("scheduling", "coding", "commitment") or precision_markers:
+            return "L3_chunks+L2" if uncertainty > 0.35 else "L1_summary+L2"
+        if intent in ("planning", "strategy", "explain"):
+            return "L1_summary+L2"
+        # default: light semantic only if it’s cheap
+        return "L2_semantic" if (uncertainty > 0.5 or self.underuse_bias > 0.15) else "none"
+
+    def build_query(self, user_text: str, tier: MemoryTier) -> Dict[str, Any]:
+        # Keep it simple: entity/topic extraction can be a separate module.
+        return {
+            "q": user_text[:256],
+            "tier": tier,
+            "filters": {"status": "active"},
+            "top_k": 20 if tier == "L3_chunks+L2" else 8
+        }
+
+    def retrieve(self, query: Dict[str, Any]) -> List[MemoryItem]:
+        # TODO: plug into your KV store + vector DB.
+        # Return MemoryItem list sorted by relevance.
+        return []
+
+    def compress_digest(self, items: List[MemoryItem]) -> str:
+        # Simple heuristic: drop sensitive unless explicitly needed, drop low confidence, cap length.
+        kept = []
+        token_count = 0
+        for it in items:
+            if it.status != "active":
+                continue
+            if it.sensitivity == "sensitive":
+                continue
+            if it.confidence < 0.6:
+                continue
+            # token estimation (rough)
+            est = max(1, len(it.text) // 4)
+            if token_count + est > self.token_budget:
+                break
+            kept.append(it)
+            token_count += est
+
+        # Build a structured digest (better than raw chunks)
+        lines = [f"- [{it.tier}] {it.text}" for it in kept]
+        return "\n".join(lines)
+```
+
+### 6.3 Evaluator Agent (LLM-based) + deterministic checks
+
+In practice you’ll do **hybrid**: fast deterministic checks + LLM adjudication.
+
+```python
+class MemoryEvaluator:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def quick_checks(self, user_text: str, digest: str, answer: str, trace: MemoryTrace) -> Dict[str, Any]:
+        # Deterministic heuristics for F4 bloat + some F0 triggers
+        bloat = 1.0 if trace.injected_tokens <= 600 else 0.0
+        needs_memory = any(k in user_text.lower() for k in ["as we discussed", "last time", "you said", "again"])
+        underuse_flag = needs_memory and len(trace.retrieved_ids) == 0
+        return {"bloat_ok": bloat, "underuse_flag": underuse_flag}
+
+    def llm_eval(self, user_text: str, digest: str, answer: str, trace: MemoryTrace) -> Dict[str, Any]:
+        prompt = f"""
+You are an evaluator for memory usage in an assistant.
+Return JSON with:
+scores: underuse, irrelevance, stale, unsafe, bloat (0..1)
+failures: list of strings among ["F0_underuse","F1_irrelevant","F2_stale","F3_unsafe","F4_bloat"]
+why: short bullets
+fix_suggestion: one of ["none","escalate_to_L3","use_L1_summary","tighten_filters","requery_with_tags","drop_sensitive","compress_digest"]
+
+User message:
+{user_text}
+
+Memory digest injected:
+{digest if digest else "(none)"}
+
+Router decision:
+{json.dumps(trace.router_decision, ensure_ascii=False)}
+
+Assistant answer:
+{answer}
+"""
+        raw = self.llm(prompt)  # your LLM call
+        return json.loads(raw)
+
+    def evaluate(self, user_text: str, digest: str, answer: str, trace: MemoryTrace) -> Dict[str, Any]:
+        qc = self.quick_checks(user_text, digest, answer, trace)
+        report = self.llm_eval(user_text, digest, answer, trace)
+        # Merge quick checks (override bloat if obvious)
+        if qc["bloat_ok"] == 0.0:
+            report["scores"]["bloat"] = 0.0
+            if "F4_bloat" not in report["failures"]:
+                report["failures"].append("F4_bloat")
+                report["fix_suggestion"] = "compress_digest"
+        if qc["underuse_flag"]:
+            report["scores"]["underuse"] = min(report["scores"]["underuse"], 0.2)
+            if "F0_underuse" not in report["failures"]:
+                report["failures"].append("F0_underuse")
+                report["fix_suggestion"] = "escalate_to_L3"
+        return report
+```
+
+### 6.4 Debugging Agent: diagnose + propose repair actions
+
+```python
+class MemoryDebugger:
+    def __init__(self, llm):
+        self.llm = llm
+
+    def diagnose(self, eval_report: Dict[str, Any], trace: MemoryTrace, retrieved_items: List[MemoryItem]) -> Dict[str, Any]:
+        prompt = f"""
+You are a debugging agent for a memory system.
+Given an evaluation report and retrieval metadata, produce JSON:
+root_cause: one of
+["router_gate_too_strict","query_bad","ranker_bad","memory_missing","stale_not_filtered","privacy_filter_missing","budget_policy_wrong"]
+repair: {{
+  "action": one of ["rerun_retrieval","escalate_tier","tighten_filters","compress_digest","drop_items","no_change"],
+  "tier": optional,
+  "filter_updates": optional dict,
+  "query_rewrite": optional string
+}}
+why: bullets
+policy_update: optional suggestion for offline router tuning
+"""
+        payload = {
+            "eval_report": eval_report,
+            "router_decision": trace.router_decision,
+            "retrieved": [
+                {"id": it.memory_id, "tier": it.tier, "tags": it.tags, "conf": it.confidence,
+                 "sensitivity": it.sensitivity, "status": it.status}
+                for it in retrieved_items[:15]
+            ],
+        }
+        raw = self.llm(prompt + "\n\nDATA:\n" + json.dumps(payload, ensure_ascii=False))
+        return json.loads(raw)
+```
+
+### 6.5 Bounded “auto-fix” loop
+
+```python
+def handle_turn(user_text: str, intent: str, llm_main, llm_eval, llm_dbg, router: MemoryRouter):
+    turn_id = f"t{int(time.time()*1000)}"
+    uncertainty = 0.5  # TODO: plug in your own uncertainty estimator
+
+    tier = router.decide_tier(user_text, intent, uncertainty)
+    query = router.build_query(user_text, tier)
+    items = router.retrieve(query)
+    digest = router.compress_digest(items)
+
+    trace = MemoryTrace(
+        turn_id=turn_id,
+        router_decision={"tier": tier, "intent": intent, "uncertainty": uncertainty},
+        retrieval_query=query,
+        retrieved_ids=[it.memory_id for it in items],
+        injected_tokens=len(digest) // 4
+    )
+
+    # Main response
+    answer = llm_main(f"MEMORY:\n{digest}\n\nUSER:\n{user_text}\n")
+
+    # Evaluate
+    evaluator = MemoryEvaluator(llm_eval)
+    report = evaluator.evaluate(user_text, digest, answer, trace)
+
+    # Repair (one retry max)
+    if report["failures"] and report.get("fix_suggestion") not in (None, "none"):
+        debugger = MemoryDebugger(llm_dbg)
+        dbg = debugger.diagnose(report, trace, items)
+
+        repair = dbg.get("repair", {})
+        if repair.get("action") in ("escalate_tier", "rerun_retrieval"):
+            new_tier = repair.get("tier") or ("L3_chunks+L2" if tier != "L3_chunks+L2" else tier)
+            new_query = router.build_query(user_text, new_tier)
+            # apply filter updates if present
+            if "filter_updates" in repair:
+                new_query["filters"].update(repair["filter_updates"])
+            if "query_rewrite" in repair:
+                new_query["q"] = repair["query_rewrite"][:256]
+
+            new_items = router.retrieve(new_query)
+            new_digest = router.compress_digest(new_items)
+            answer2 = llm_main(f"MEMORY:\n{new_digest}\n\nUSER:\n{user_text}\n")
+
+            # optionally accept repaired answer only if improved
+            return answer2, {"eval": report, "debug": dbg, "repaired": True}
+
+    return answer, {"eval": report, "repaired": False}
+```
+
+---
+
+## 7) How the evaluator/debugger specifically prevents “insufficient memory usage”
+
+### Mechanism for F0 (Underuse)
+
+Evaluator detects “memory-required” patterns:
+
+* user references prior commitments/decisions/preferences
+* user asks “what did we decide”
+* the task is scheduling/coding/commitment (precision intent)
+
+If router returned `none` or only `L2`, evaluator flags F0 and suggests:
+
+* escalate to `L1_summary+L2` or `L3_chunks+L2`
+* rewrite query with extracted entities (project name, person, date window)
+
+Debugger then proposes exact actions: “escalate tier”, “filter tags project:X”, “include last 2 summaries”.
+
+### Mechanism for F4 (Bloat)
+
+Evaluator checks injected tokens and relevance.
+Debugger suggests compression plan:
+
+* keep only high-confidence, active, non-sensitive
+* convert chunks to a structured digest (“Preferences”, “Active goals”, “Open decisions”)
+
+---
+
+## 8) Practical enhancements that make this work in production
+
+### A) Router needs “intent + precision need + uncertainty”
+
+Don’t rely purely on embeddings retrieval.
+
+* Intent classifier can be small (or LLM cheap prompt).
+* Uncertainty can be approximated with:
+
+  * entropy of router classifier
+  * disagreement between two cheap graders
+  * or “did we retrieve anything relevant above threshold?”
+
+### B) Add **Memory Coverage Metrics**
+
+Track:
+
+* “repeat rate”: user repeats a detail within next 3 turns
+* “correction rate”: user says “no, that’s wrong”
+* “as I said” rate
+  These become weak labels for evaluator tuning.
+
+### C) Store **provenance and contradiction markers**
+
+If user says “actually X”, mark old key as `stale`, don’t delete.
+Evaluator uses contradiction info to avoid F2.
+
+### D) Put evaluator in **shadow mode first**
+
+You’ll discover the dominant failure is usually:
+
+* retrieval query too generic
+* lack of tags (project/person)
+* missing structured memory keys
+
+---
+
+## 9) If you’re using LangGraph (pattern)
+
+Typical node graph:
+
+* `classify_intent` → `memory_router` → `retrieve_memory` → `compress_digest` → `assistant`
+* then parallel: `evaluator`
+* conditional edge: if fail → `debugger` → `retrieve_memory_retry` → `assistant_retry`
+
+This fits naturally with “planner/executor” systems.
+
+---
+
+If you tell me what stack you’re using (LangGraph vs custom, vector DB choice, whether you already have session summaries), I can tailor the code to your environment (including a concrete “MemoryDigest schema” and exact evaluator/debugger prompts that are robust and cheap).
+
+
